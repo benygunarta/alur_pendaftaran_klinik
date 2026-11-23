@@ -4,7 +4,6 @@ import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { QUEUE_STEPS } from '../data/queueSteps';
 import {
   FLOOR_TOP,
-  LEG_LENGTH,
   REST_ARM_Z,
   ROOM_FLOOR_TOP,
   SPEED_ROOM,
@@ -18,44 +17,31 @@ import {
 import { buildRoute } from '../scene/path/route';
 import { samplePath as sampleSmoothPath, buildSmoothPath } from '../scene/path/smoothPath';
 import type { CorridorRange } from '../scene/path/types';
+import { buildBaseFloor } from '../scene/builders/baseFloor';
+import { buildRooms } from '../scene/builders/rooms';
+import {
+  applySittingPose,
+  buildCharacter,
+  collectCharacterMats,
+} from '../scene/builders/characters';
+import {
+  buildGuidanceLines,
+  createActiveRoomMarkers,
+  createQueueDisplays,
+  createSpeechBubble,
+} from '../scene/builders/decorations';
+import {
+  drawBubble,
+  drawQueueDisplay,
+} from '../scene/textures/canvasTextures';
+import type {
+  CharacterParts,
+  QueueDisplay,
+  RoomEntry,
+  StaffEntry,
+} from '../scene/types';
 
 type Mode = 'transition' | 'room' | 'idle';
-
-interface CharacterParts {
-  group: THREE.Group;
-  head: THREE.Mesh;
-  torso: THREE.Mesh;
-  /** Pivot di bahu — mesh lengan digeser ke bawah dari pivot. */
-  leftArm: THREE.Group;
-  rightArm: THREE.Group;
-  /** Pivot di pinggul — mesh kaki digeser ke bawah dari pivot. */
-  leftLeg: THREE.Group;
-  rightLeg: THREE.Group;
-}
-
-interface StaffEntry {
-  parts: CharacterParts;
-  baseY: number;
-  phase: number;
-}
-
-/** Material satu ruangan beserta warna/opasitas dasarnya, untuk crossfade transisi. */
-interface RoomEntry {
-  group: THREE.Group;
-  /** Posisi Y asli ruangan, dipakai saat menggeser lantai anti-z-fighting. */
-  baseY: number;
-  mats: { mat: THREE.MeshStandardMaterial; base: THREE.Color; opacity: number }[];
-  dim: number;
-}
-
-/** Layar papan nomor antrean yang bisa diperbarui angkanya. */
-interface QueueDisplay {
-  canvas: HTMLCanvasElement;
-  ctx: CanvasRenderingContext2D;
-  texture: THREE.CanvasTexture;
-  number: number;
-  prefix: string;
-}
 
 export class HospitalQueueScene {
   private container: HTMLElement;
@@ -198,35 +184,41 @@ export class HospitalQueueScene {
     this.controls.target.set(-9, 0, -9);
 
     this.setupLighting();
-    this.buildBaseFloor();
-    this.buildRooms();
-    this.buildGuidanceLines();
-    this.createActiveRoomMarkers();
-    this.createQueueDisplays();
-    this.createSpeechBubble();
+    buildBaseFloor(this.scene);
+    this.roomEntries = buildRooms(this.scene);
+    buildGuidanceLines(this.scene);
+    const markers = createActiveRoomMarkers(this.scene);
+    this.activeWash = markers.wash;
+    this.activeArrow = markers.arrow;
+    this.queueDisplays = createQueueDisplays(this.roomEntries);
+    const bubble = createSpeechBubble(this.scene);
+    this.bubbleMesh = bubble.mesh;
+    this.bubbleCanvas = bubble.canvas;
+    this.bubbleCtx = bubble.ctx;
+    this.bubbleTexture = bubble.texture;
 
-    this.patient = this.buildCharacter({ shirt: '#f59e0b', pants: '#334155', sleeves: false, face: true });
+    this.patient = buildCharacter({ shirt: '#f59e0b', pants: '#334155', sleeves: false, face: true });
     this.scene.add(this.patient.group);
 
     // Pasien kedua duduk di ruang tunggu agar ruangan terasa hidup.
-    this.sittingPatient = this.buildCharacter({
+    this.sittingPatient = buildCharacter({
       shirt: '#7c3aed',
       pants: '#1e293b',
       sleeves: true,
       face: true,
     });
-    this.applySittingPose(this.sittingPatient);
+    applySittingPose(this.sittingPatient);
     // Koordinat ini lokal terhadap ruang 2 (kursi tengah), bukan world.
     this.sittingPatient.group.position.set(-1.1, ROOM_FLOOR_TOP - 0.045, -2.5);
     const waitingRoom = this.roomEntries[1]?.group;
     if (waitingRoom) {
       waitingRoom.add(this.sittingPatient.group);
-      this.roomEntries[1].mats.push(...this.collectCharacterMats(this.sittingPatient));
+      this.roomEntries[1].mats.push(...collectCharacterMats(this.sittingPatient));
     }
     this.sittingBaseY = this.sittingPatient.group.position.y;
 
     QUEUE_STEPS.forEach((step, i) => {
-      const staff = this.buildCharacter({
+      const staff = buildCharacter({
         shirt: '#e2e8f0',
         pants: '#334155',
         sleeves: true,
@@ -244,7 +236,7 @@ export class HospitalQueueScene {
       const roomGroup = this.roomEntries[i]?.group;
       if (roomGroup) {
         roomGroup.add(staff.group);
-        this.roomEntries[i].mats.push(...this.collectCharacterMats(staff));
+        this.roomEntries[i].mats.push(...collectCharacterMats(staff));
       }
       this.staffList.push({ parts: staff, baseY: sy + FLOOR_TOP, phase: i * 1.7 });
     });
@@ -272,6 +264,17 @@ export class HospitalQueueScene {
     return w / h;
   }
 
+  /** Gambar ulang gelembung memakai warna aksen & jumlah titik terkini. */
+  private redrawBubble(): void {
+    drawBubble(
+      this.bubbleCtx,
+      this.bubbleCanvas,
+      this.bubbleTexture,
+      this.bubbleAccent,
+      this.bubbleDots
+    );
+  }
+
   private setupLighting(): void {
     // Ambient diturunkan agar bayangan tetap terbaca; hemisphere memberi
     // nuansa langit (atas) dan lantai (bawah) yang lebih alami.
@@ -292,638 +295,6 @@ export class HospitalQueueScene {
     dirLight.shadow.bias = -0.0005;
     dirLight.shadow.normalBias = 0.02;
     this.scene.add(dirLight);
-  }
-
-  private buildBaseFloor(): void {
-    // Lantai dasar sengaja dibuat sangat luas (jauh melebihi pandangan kamera)
-    // sehingga tepi kotaknya tidak pernah terlihat. Batas pandangan kini hanya
-    // ditentukan oleh mask radial CSS, sehingga scene menyatu dengan halaman.
-    const base = new THREE.Mesh(
-      new THREE.BoxGeometry(70, 0.6, 70),
-      // Warna lantai disamakan dengan nuansa slate halaman agar tepinya
-      // menyatu saat kanvas memudar (mask radial).
-      new THREE.MeshStandardMaterial({ color: '#eef2f7', roughness: 0.9 })
-    );
-    base.position.y = FLOOR_TOP - 0.3;
-    base.receiveShadow = true;
-    this.scene.add(base);
-  }
-
-  private buildRooms(): void {
-    const wallMat = new THREE.MeshStandardMaterial({ color: '#f8fafc', roughness: 0.8 });
-
-    const addBox = (
-      w: number,
-      h: number,
-      d: number,
-      x: number,
-      y: number,
-      z: number,
-      mat: THREE.Material,
-      room: THREE.Group,
-      cast = true
-    ) => {
-      const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
-      mesh.position.set(x, y, z);
-      mesh.castShadow = cast;
-      mesh.receiveShadow = true;
-      room.add(mesh);
-      return mesh;
-    };
-
-    QUEUE_STEPS.forEach((step, index) => {
-      const room = new THREE.Group();
-      room.position.set(...step.roomCenter);
-
-      // Semua ruangan tetap di layer 0 (layer default kamera). Visibilitas
-      // diatur lewat group.visible di updateRoomVisibility(), bukan layer —
-      // kalau mesh ruangan 2–4 dimasukkan layer 1–3, kamera tidak akan
-      // merendernya sama sekali saat tahap tersebut aktif.
-
-      // Dinding per ruangan (material terpisah untuk efek dim/redup independen).
-      const roomWallMat = wallMat.clone();
-
-      // Lantai ruangan sedikit lebih tinggi dari lantai dasar (anti z-fighting).
-      const floorMat = new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 0.7 });
-      addBox(
-        11.5,
-        0.2,
-        11.5,
-        0,
-        ROOM_FLOOR_TOP - 0.1,
-        0,
-        floorMat,
-        room,
-        false
-      );
-
-      // Dinding belakang (sisi -z) selalu utuh.
-      addBox(11.5, 2.6, 0.35, 0, 1.35, -5.55, roomWallMat, room);
-
-      // Dinding kiri utuh di semua ruangan. Pintu ruang 4 sekarang ada di sisi
-      // depan (seperti ruang 1–3), jadi celah lama di local z -4…-2 ditutup.
-      addBox(0.35, 2.6, 11.5, -5.55, 1.35, 0, roomWallMat, room);
-
-      const accentMat = new THREE.MeshStandardMaterial({
-        color: step.accentColor,
-        roughness: 0.5,
-      });
-      addBox(11.5, 0.16, 0.38, 0, 2.55, -5.55, accentMat, room, false);
-
-      this.buildRoomSign(step.roomSign, step.accentColor, room);
-      this.buildThresholds(index, step.accentColor, addBox, room);
-
-      this.buildFurniture(index, accentMat, roomWallMat, room);
-
-      // Kumpulkan material khas ruangan (dinding, lantai, aksen, furnitur)
-      // untuk efek dim/redup saat ruangan tidak aktif.
-      const seen = new Set<THREE.Material>();
-      const mats: RoomEntry['mats'] = [];
-      room.traverse((obj) => {
-        if (!(obj instanceof THREE.Mesh)) return;
-        const list = Array.isArray(obj.material) ? obj.material : [obj.material];
-        for (const m of list) {
-          if (m instanceof THREE.MeshStandardMaterial && !seen.has(m)) {
-            seen.add(m);
-            mats.push({ mat: m, base: m.color.clone(), opacity: m.opacity });
-          }
-        }
-      });
-      this.roomEntries.push({ group: room, baseY: room.position.y, mats, dim: 1 });
-
-      this.scene.add(room);
-    });
-  }
-
-  /** Membuat canvas texture untuk teks (plang ruangan, papan antrean). */
-  private makeTextTexture(opts: {
-    width: number;
-    height: number;
-    draw: (ctx: CanvasRenderingContext2D, w: number, h: number) => void;
-  }): { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D; texture: THREE.CanvasTexture } {
-    const canvas = document.createElement('canvas');
-    canvas.width = opts.width;
-    canvas.height = opts.height;
-    const ctx = canvas.getContext('2d')!;
-    opts.draw(ctx, canvas.width, canvas.height);
-    const texture = new THREE.CanvasTexture(canvas);
-    texture.colorSpace = THREE.SRGBColorSpace;
-    texture.minFilter = THREE.LinearFilter;
-    return { canvas, ctx, texture };
-  }
-
-  /** Plang nama ruangan di dinding belakang. */
-  private buildRoomSign(text: string, accent: string, room: THREE.Group): void {
-    const { texture } = this.drawText({
-      text,
-      bg: '#ffffff',
-      fg: accent,
-      border: accent,
-      width: 512,
-      height: 64,
-      font: 'bold 40px system-ui, sans-serif',
-    });
-    const sign = new THREE.Mesh(
-      new THREE.PlaneGeometry(4.6, 0.55),
-      new THREE.MeshBasicMaterial({ map: texture, toneMapped: false })
-    );
-    sign.position.set(0, 2.15, -5.36);
-    room.add(sign);
-  }
-
-  /** Plang teks generik: latar, border, dan teks terpusat. */
-  private drawText(opts: {
-    text: string;
-    bg: string;
-    fg: string;
-    border?: string;
-    width: number;
-    height: number;
-    font: string;
-  }): { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D; texture: THREE.CanvasTexture } {
-    return this.makeTextTexture({
-      width: opts.width,
-      height: opts.height,
-      draw: (ctx, w, h) => {
-        ctx.fillStyle = opts.bg;
-        ctx.fillRect(0, 0, w, h);
-        if (opts.border) {
-          ctx.strokeStyle = opts.border;
-          ctx.lineWidth = 6;
-          ctx.strokeRect(3, 3, w - 6, h - 6);
-        }
-        let size = parseInt(opts.font.match(/(\d+)px/)?.[1] ?? '40', 10);
-        ctx.font = opts.font;
-        while (ctx.measureText(opts.text).width > w - 28 && size > 14) {
-          size -= 2;
-          ctx.font = opts.font.replace(/\d+px/, `${size}px`);
-        }
-        ctx.fillStyle = opts.fg;
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(opts.text, w / 2, h / 2 + 1);
-      },
-    });
-  }
-
-  /**
-   * Kusen masuk: dua tiang tinggi + header di sisi depan, dipakai semua
-   * ruangan supaya bentuk pintunya seragam. Posisi pintu ruang 2 tetap
-   * di local x = -3.2.
-   */
-  private buildThresholds(
-    index: number,
-    accent: string,
-    addBox: (
-      w: number,
-      h: number,
-      d: number,
-      x: number,
-      y: number,
-      z: number,
-      mat: THREE.Material,
-      room: THREE.Group,
-      cast?: boolean
-    ) => THREE.Mesh,
-    room: THREE.Group
-  ): void {
-    const mat = new THREE.MeshStandardMaterial({ color: accent, roughness: 0.55 });
-    const postH = 2.3;
-    const postW = 0.22; // tebal tiang mengikuti sumbu x
-    const frameDepth = 0.4; // tebal kusen mengikuti sumbu z
-    const halfWidth = 1.2;
-    const yPost = ROOM_FLOOR_TOP + postH / 2;
-    // Ruang 2 tetap masuk di local x = -3.2; ruang lainnya di tengah.
-    const doorX = index === 1 ? -3.2 : 0;
-
-    addBox(postW, postH, frameDepth, doorX - halfWidth, yPost, 5.45, mat, room);
-    addBox(postW, postH, frameDepth, doorX + halfWidth, yPost, 5.45, mat, room);
-    addBox(2 * halfWidth + postW, 0.3, frameDepth, doorX, 2.5, 5.45, mat, room, false);
-  }
-
-  /**
-   * Garis panduan lantai di koridor — mengikuti lintasan transisi tiap tahap,
-   * warna mengikuti aksen tahap tujuan, lengkap dengan panah arah.
-   */
-  private buildGuidanceLines(): void {
-    QUEUE_STEPS.forEach((step) => {
-      const tr = step.transition;
-      if (!tr || tr.length < 2) return;
-
-      const stripMat = new THREE.MeshStandardMaterial({
-        color: step.accentColor,
-        roughness: 0.6,
-      });
-      const arrowMat = new THREE.MeshBasicMaterial({ color: step.accentColor });
-
-      for (let i = 0; i < tr.length - 1; i++) {
-        const a = new THREE.Vector3(tr[i][0], FLOOR_TOP, tr[i][2]);
-        const b = new THREE.Vector3(tr[i + 1][0], FLOOR_TOP, tr[i + 1][2]);
-        const len = a.distanceTo(b);
-        if (len < 0.05) continue;
-        const mid = a.clone().lerp(b, 0.5);
-        const angle = Math.atan2(b.x - a.x, b.z - a.z);
-
-        const strip = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.016, len), stripMat);
-        strip.position.set(mid.x, FLOOR_TOP + 0.008, mid.z);
-        strip.rotation.y = angle;
-        strip.receiveShadow = false;
-        this.scene.add(strip);
-
-        // Panah segitiga pipih di tengah segmen.
-        const holder = new THREE.Group();
-        holder.position.set(mid.x, FLOOR_TOP + 0.015, mid.z);
-        holder.rotation.y = angle;
-        const cone = new THREE.Mesh(new THREE.ConeGeometry(0.26, 0.5, 3), arrowMat);
-        cone.rotation.x = Math.PI / 2; // menunjuk +z lokal (arah lintasan)
-        cone.scale.set(1, 1, 0.05); // pipihkan ke lantai
-        holder.add(cone);
-        this.scene.add(holder);
-      }
-    });
-  }
-
-  /** Panah pointer mengambang di atas ruangan tahap aktif. */
-  private createActiveRoomMarkers(): void {
-    // Cincin wash lantai ruangan aktif.
-    this.activeWash = new THREE.Mesh(
-      new THREE.PlaneGeometry(11.3, 11.3),
-      new THREE.MeshBasicMaterial({
-        color: '#0284c7',
-        transparent: true,
-        opacity: 0.12,
-        depthWrite: false,
-      })
-    );
-    this.activeWash.rotation.x = -Math.PI / 2;
-    this.activeWash.renderOrder = 2;
-    this.scene.add(this.activeWash);
-
-    // Panah kerucut terbalik yang mengambang & berputar pelan.
-    this.activeArrow = new THREE.Group();
-    const cone = new THREE.Mesh(
-      new THREE.ConeGeometry(0.38, 0.75, 4),
-      new THREE.MeshBasicMaterial({ color: '#0284c7', toneMapped: false })
-    );
-    cone.rotation.x = Math.PI; // memuncak ke bawah
-    this.activeArrow.add(cone);
-    this.scene.add(this.activeArrow);
-  }
-
-  /** Papan nomor antrean digital di dinding (Ruang 1 & 2). */
-  private createQueueDisplays(): void {
-    const configs: { room: THREE.Group | undefined; x: number; prefix: string; start: number }[] = [
-      { room: this.roomEntries[0]?.group, x: 3.6, prefix: 'A-', start: 41 },
-      { room: this.roomEntries[1]?.group, x: 3.6, prefix: 'B-', start: 16 },
-    ];
-
-    configs.forEach((cfg) => {
-      if (!cfg.room) return;
-      const display: QueueDisplay = {
-        canvas: document.createElement('canvas'),
-        ctx: null as unknown as CanvasRenderingContext2D,
-        texture: null as unknown as THREE.CanvasTexture,
-        number: cfg.start,
-        prefix: cfg.prefix,
-      };
-      display.canvas.width = 256;
-      display.canvas.height = 128;
-      display.ctx = display.canvas.getContext('2d')!;
-      display.texture = new THREE.CanvasTexture(display.canvas);
-      display.texture.colorSpace = THREE.SRGBColorSpace;
-      display.texture.minFilter = THREE.LinearFilter;
-
-      const mesh = new THREE.Mesh(
-        new THREE.PlaneGeometry(1.1, 0.55),
-        new THREE.MeshBasicMaterial({ map: display.texture, toneMapped: false })
-      );
-      mesh.position.set(cfg.x, 1.5, -5.36);
-      cfg.room.add(mesh);
-
-      this.drawQueueDisplay(display);
-      this.queueDisplays.push(display);
-    });
-  }
-
-  private drawQueueDisplay(display: QueueDisplay): void {
-    const { ctx, canvas } = display;
-    ctx.fillStyle = '#0f172a';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.strokeStyle = '#334155';
-    ctx.lineWidth = 6;
-    ctx.strokeRect(3, 3, canvas.width - 6, canvas.height - 6);
-
-    const label = `${display.prefix}${String(display.number).padStart(3, '0')}`;
-    ctx.font = 'bold 64px ui-monospace, monospace';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.shadowColor = '#38bdf8';
-    ctx.shadowBlur = 16;
-    ctx.fillStyle = '#7dd3fc';
-    ctx.fillText(label, canvas.width / 2, canvas.height / 2 + 4);
-    ctx.shadowBlur = 0;
-
-    display.texture.needsUpdate = true;
-  }
-
-  /** Pose duduk: kaki maju menyentuh lantai, lengan di pangkuan. */
-  private applySittingPose(p: CharacterParts): void {
-    const legAngle = -0.84; // ±48° — telapak hampir menyentuh lantai
-    p.leftLeg.rotation.x = legAngle;
-    p.rightLeg.rotation.x = legAngle;
-    p.leftArm.rotation.x = -0.4;
-    p.rightArm.rotation.x = -0.4;
-    p.leftArm.rotation.z = -REST_ARM_Z;
-    p.rightArm.rotation.z = REST_ARM_Z;
-  }
-
-  private buildFurniture(
-    index: number,
-    accentMat: THREE.Material,
-    wallMat: THREE.Material,
-    room: THREE.Group
-  ): void {
-    const box = (w: number, h: number, d: number, x: number, y: number, z: number, mat: THREE.Material, cast = true) => {
-      const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
-      mesh.position.set(x, y, z);
-      mesh.castShadow = cast;
-      mesh.receiveShadow = true;
-      room.add(mesh);
-      return mesh;
-    };
-
-    if (index === 0) {
-      // Ruangan 1: Loket Pendaftaran + Kiosk Antrean
-      box(4.8, 1.1, 1.1, -1.2, 0.65, -2.8, wallMat);
-      box(4.9, 0.12, 1.2, -1.2, 1.25, -2.8, accentMat, false);
-      box(0.7, 1.35, 0.5, 2.8, 0.75, -2.5, wallMat);
-      const kioskScreen = box(0.6, 0.45, 0.08, 2.8, 1.35, -2.22, accentMat, false);
-      kioskScreen.rotation.x = -0.25;
-      // Printer tiket kecil di atas loket.
-      const printerMat = new THREE.MeshStandardMaterial({ color: '#475569', roughness: 0.6 });
-      box(0.4, 0.26, 0.32, -2.6, 1.44, -2.8, printerMat);
-      box(0.26, 0.02, 0.2, -2.6, 1.58, -2.8, wallMat, false);
-    } else if (index === 1) {
-      // Ruangan 2: Ruang Tunggu + Meja Skrining
-      const chairMat = new THREE.MeshStandardMaterial({ color: '#cbd5e1', roughness: 0.6 });
-      for (let i = 0; i < 3; i++) {
-        box(1.1, 0.45, 0.9, -2.5 + i * 1.4, 0.35, -2.4, chairMat);
-        box(1.1, 0.55, 0.18, -2.5 + i * 1.4, 0.75, -2.76, accentMat);
-      }
-      box(2.4, 0.95, 1.1, 2.5, 0.58, -1.5, wallMat);
-      // Timbangan berdiri di sudut belakang.
-      box(0.55, 0.1, 0.55, 4.6, 0.21, -4.2, wallMat);
-      box(0.1, 1.1, 0.1, 4.6, 0.81, -4.4, wallMat);
-      box(0.32, 0.24, 0.1, 4.6, 1.42, -4.4, accentMat, false);
-      // Monitor tanda vital di meja skrining.
-      box(0.5, 0.4, 0.16, 2.9, 1.255, -1.85, wallMat);
-      const vitalScreen = new THREE.Mesh(
-        new THREE.PlaneGeometry(0.42, 0.32),
-        new THREE.MeshBasicMaterial({ color: '#7dd3fc', toneMapped: false })
-      );
-      vitalScreen.position.set(2.9, 1.255, -1.76);
-      room.add(vitalScreen);
-    } else if (index === 2) {
-      // Ruangan 3: Poliklinik
-      box(3.2, 0.9, 1.3, -0.5, 0.55, -2.2, wallMat);
-      box(3.25, 0.1, 1.35, -0.5, 1.02, -2.2, accentMat, false);
-      box(1.2, 0.75, 0.12, -0.5, 1.4, -2.65, accentMat, false);
-      // Tempat periksa (exam bed) di sudut kanan belakang.
-      box(1.7, 0.45, 0.85, 3.6, 0.385, -3.6, wallMat);
-      box(1.7, 0.12, 0.85, 3.6, 0.67, -3.6, accentMat, false);
-      box(0.4, 0.1, 0.5, 4.3, 0.79, -3.6, wallMat, false);
-      // Lemari dokter dengan lambang salib di dinding kiri.
-      box(0.5, 1.7, 1.1, -5.1, 1.01, -3.8, wallMat);
-      box(0.05, 0.44, 0.16, -4.84, 1.35, -3.8, accentMat, false);
-      box(0.05, 0.16, 0.44, -4.84, 1.35, -3.8, accentMat, false);
-    } else {
-      // Ruangan 4: Farmasi & Kasir
-      for (let row = 0; row < 2; row++) {
-        box(3.6, 1.8, 0.6, -1.5 + row * 4.2, 1.0, -4.4, wallMat);
-      }
-      box(4.5, 1.05, 1.15, 0, 0.62, -1.6, wallMat);
-      box(4.55, 0.12, 1.2, 0, 1.18, -1.6, accentMat, false);
-      // Mesin kasir kecil di konter.
-      box(0.45, 0.3, 0.35, 1.7, 1.39, -1.6, wallMat);
-      box(0.3, 0.2, 0.05, 1.7, 1.64, -1.72, accentMat, false);
-      this.buildMedicineBoxes(room);
-    }
-  }
-
-  /** Kotak obat berwarna di rak farmasi (instanced — dioptimalkan). */
-  private buildMedicineBoxes(room: THREE.Group): void {
-    const palette = ['#38bdf8', '#f472b6', '#fbbf24', '#a78bfa', '#34d399', '#f87171'];
-    const cols = 5;
-    const rows = 2;
-    const shelfCenters = [-1.5, 2.7];
-    const count = shelfCenters.length * cols * rows;
-
-    const geo = new THREE.BoxGeometry(0.3, 0.34, 0.22);
-    const mat = new THREE.MeshStandardMaterial({ roughness: 0.55 });
-    const instanced = new THREE.InstancedMesh(geo, mat, count);
-
-    const dummy = new THREE.Object3D();
-    const color = new THREE.Color();
-    let i = 0;
-    shelfCenters.forEach((cx) => {
-      for (let r = 0; r < rows; r++) {
-        for (let c = 0; c < cols; c++) {
-          dummy.position.set(cx - 1.575 + c * 0.35, 0.45 + r * 0.55, -4.01);
-          dummy.updateMatrix();
-          instanced.setMatrixAt(i, dummy.matrix);
-          color.set(palette[(i + r) % palette.length]);
-          instanced.setColorAt(i, color);
-          i++;
-        }
-      }
-    });
-    instanced.instanceMatrix.needsUpdate = true;
-    if (instanced.instanceColor) instanced.instanceColor.needsUpdate = true;
-    instanced.castShadow = false;
-    instanced.receiveShadow = false;
-    room.add(instanced);
-  }
-
-  private buildCharacter(opts: {
-    shirt: string;
-    pants: string;
-    sleeves: boolean;
-    badge?: string;
-    face?: boolean;
-  }): CharacterParts {
-    const group = new THREE.Group();
-
-    const shirtMat = new THREE.MeshStandardMaterial({ color: opts.shirt, roughness: 0.6 });
-    const pantsMat = new THREE.MeshStandardMaterial({ color: opts.pants, roughness: 0.7 });
-    const skinMat = new THREE.MeshStandardMaterial({ color: '#fed7aa', roughness: 0.6 });
-
-    const torso = new THREE.Mesh(new THREE.BoxGeometry(0.65, 0.85, 0.38), shirtMat);
-    torso.position.y = 1.05;
-    torso.castShadow = true;
-    group.add(torso);
-
-    if (opts.badge) {
-      const patch = new THREE.Mesh(
-        new THREE.BoxGeometry(0.14, 0.14, 0.03),
-        new THREE.MeshStandardMaterial({ color: opts.badge, roughness: 0.4 })
-      );
-      patch.position.set(0.17, 0.17, 0.2);
-      torso.add(patch);
-    }
-
-    const head = new THREE.Mesh(new THREE.BoxGeometry(0.52, 0.52, 0.52), skinMat);
-    head.position.y = 1.78;
-    head.castShadow = true;
-    group.add(head);
-
-    if (opts.face) {
-      // Mata kecil agar arah pandang & gerakan kepala terbaca.
-      const eyeMat = new THREE.MeshStandardMaterial({ color: '#0f172a', roughness: 0.4 });
-      const eyeGeo = new THREE.BoxGeometry(0.07, 0.09, 0.03);
-      const leftEye = new THREE.Mesh(eyeGeo, eyeMat);
-      leftEye.position.set(-0.12, 0.05, 0.265);
-      head.add(leftEye);
-      const rightEye = new THREE.Mesh(eyeGeo, eyeMat);
-      rightEye.position.set(0.12, 0.05, 0.265);
-      head.add(rightEye);
-    }
-
-    // Kaki: pivot di pinggul (y=0.62), mesh digeser ke bawah dari pivot
-    // sehingga putaran terjadi di sendi, bukan di tengah paha.
-    const legGeo = new THREE.BoxGeometry(0.24, LEG_LENGTH, 0.26);
-    const makeLeg = (x: number): THREE.Group => {
-      const pivot = new THREE.Group();
-      pivot.position.set(x, LEG_LENGTH, 0);
-      const mesh = new THREE.Mesh(legGeo, pantsMat);
-      mesh.position.y = -LEG_LENGTH / 2;
-      mesh.castShadow = true;
-      pivot.add(mesh);
-      group.add(pivot);
-      return pivot;
-    };
-    const leftLeg = makeLeg(-0.17);
-    const rightLeg = makeLeg(0.17);
-
-    // Lengan: pivot di bahu (y=1.38).
-    const armMat = opts.sleeves ? shirtMat : skinMat;
-    const armGeo = new THREE.BoxGeometry(0.2, 0.65, 0.22);
-    const makeArm = (x: number): THREE.Group => {
-      const pivot = new THREE.Group();
-      pivot.position.set(x, 1.38, 0);
-      const mesh = new THREE.Mesh(armGeo, armMat);
-      mesh.position.y = -0.33;
-      mesh.castShadow = true;
-      pivot.add(mesh);
-      pivot.rotation.z = x < 0 ? -REST_ARM_Z : REST_ARM_Z;
-      group.add(pivot);
-      return pivot;
-    };
-    const leftArm = makeArm(-0.44);
-    const rightArm = makeArm(0.44);
-
-    return { group, head, torso, leftArm, rightArm, leftLeg, rightLeg };
-  }
-
-  /**
-   * Kumpulkan material karakter supaya ikut crossfade bersama ruangnya.
-   * Tanpa ini karakter akan mendadak muncul/hilang saat group.visible berubah.
-   */
-  private collectCharacterMats(parts: CharacterParts): RoomEntry['mats'] {
-    const result: RoomEntry['mats'] = [];
-    const seen = new Set<THREE.Material>();
-    parts.group.traverse((obj) => {
-      if (!(obj instanceof THREE.Mesh)) return;
-      const list = Array.isArray(obj.material) ? obj.material : [obj.material];
-      for (const m of list) {
-        if (m instanceof THREE.MeshStandardMaterial && !seen.has(m)) {
-          seen.add(m);
-          result.push({ mat: m, base: m.color.clone(), opacity: m.opacity });
-        }
-      }
-    });
-    return result;
-  }
-
-  private createSpeechBubble(): void {
-    this.bubbleCanvas = document.createElement('canvas');
-    this.bubbleCanvas.width = 160;
-    this.bubbleCanvas.height = 80;
-    this.bubbleCtx = this.bubbleCanvas.getContext('2d')!;
-
-    this.bubbleTexture = new THREE.CanvasTexture(this.bubbleCanvas);
-    this.bubbleTexture.colorSpace = THREE.SRGBColorSpace;
-    this.bubbleTexture.minFilter = THREE.LinearFilter;
-
-    const material = new THREE.MeshBasicMaterial({
-      map: this.bubbleTexture,
-      transparent: true,
-      depthWrite: false,
-      toneMapped: false,
-    });
-    this.bubbleMesh = new THREE.Mesh(new THREE.PlaneGeometry(1.6, 0.8), material);
-
-    // Bidang menghadap kamera isometrik (arah (1, 1, 1)).
-    const towardCamera = new THREE.Vector3(1, 1, 1).normalize();
-    this.bubbleMesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), towardCamera);
-    this.bubbleMesh.visible = false;
-    this.bubbleMesh.renderOrder = 5;
-    this.scene.add(this.bubbleMesh);
-
-    this.drawBubble(this.bubbleDots);
-  }
-
-  private drawBubble(dots: number): void {
-    const ctx = this.bubbleCtx;
-    const w = this.bubbleCanvas.width;
-    const h = this.bubbleCanvas.height;
-    const top = 8;
-    const bottom = h - 26;
-    const left = 8;
-    const right = w - 8;
-    const r = 16;
-
-    ctx.clearRect(0, 0, w, h);
-    ctx.lineWidth = 5;
-    ctx.lineJoin = 'round';
-    ctx.strokeStyle = this.bubbleAccent;
-    ctx.fillStyle = '#ffffff';
-
-    // Ekor dulu, agar garis tepi badan menutup sambungannya.
-    ctx.beginPath();
-    ctx.moveTo(w / 2 - 14, bottom - 4);
-    ctx.lineTo(w / 2, h - 6);
-    ctx.lineTo(w / 2 + 14, bottom - 4);
-    ctx.closePath();
-    ctx.fill();
-    ctx.stroke();
-
-    // Badan gelembung.
-    ctx.beginPath();
-    ctx.moveTo(left + r, top);
-    ctx.lineTo(right - r, top);
-    ctx.quadraticCurveTo(right, top, right, top + r);
-    ctx.lineTo(right, bottom - r);
-    ctx.quadraticCurveTo(right, bottom, right - r, bottom);
-    ctx.lineTo(left + r, bottom);
-    ctx.quadraticCurveTo(left, bottom, left, bottom - r);
-    ctx.lineTo(left, top + r);
-    ctx.quadraticCurveTo(left, top, left + r, top);
-    ctx.closePath();
-    ctx.fill();
-    ctx.stroke();
-
-    const cy = (top + bottom) / 2;
-    ctx.fillStyle = this.bubbleAccent;
-    for (let i = 0; i < 3; i++) {
-      const active = i < dots;
-      ctx.globalAlpha = active ? 1 : 0.28;
-      ctx.beginPath();
-      ctx.arc(w / 2 + (i - 1) * 36, cy, active ? 9 : 6, 0, Math.PI * 2);
-      ctx.fill();
-    }
-    ctx.globalAlpha = 1;
-
-    this.bubbleTexture.needsUpdate = true;
   }
 
   /**
@@ -1005,7 +376,7 @@ export class HospitalQueueScene {
 
     // Gelembung & penanda ruangan mengikuti aksen tahap aktif.
     this.bubbleAccent = step.accentColor;
-    this.drawBubble(this.bubbleDots);
+    this.redrawBubble();
     this.activeWash.position.set(
       step.roomCenter[0],
       ROOM_FLOOR_TOP + 0.008,
@@ -1021,7 +392,7 @@ export class HospitalQueueScene {
     if (safeIndex < this.queueDisplays.length && safeIndex !== this.lastQueueStep) {
       const display = this.queueDisplays[safeIndex];
       display.number += 1;
-      this.drawQueueDisplay(display);
+      drawQueueDisplay(display);
       this.lastQueueStep = safeIndex;
     }
 
@@ -1147,7 +518,7 @@ export class HospitalQueueScene {
       this.bubbleLastUpdate = 0;
       this.bubbleDots = 1;
       this.bubbleAppear = this.reducedMotion ? 1 : 0;
-      this.drawBubble(this.bubbleDots);
+      this.redrawBubble();
       this.bubbleMesh.visible = this.bubbleDots > 0;
     } else {
       this.mode = 'idle' as const;
@@ -1159,7 +530,7 @@ export class HospitalQueueScene {
       this.bubbleLastUpdate = 0;
       this.bubbleDots = 1;
       this.bubbleAppear = 0;
-      this.drawBubble(this.bubbleDots);
+      this.redrawBubble();
       this.bubbleMesh.visible = false;
     }
     this.camera.updateProjectionMatrix();
@@ -1276,7 +647,7 @@ export class HospitalQueueScene {
         this.bubbleTimer = 0;
         this.bubbleDots = 1;
         this.bubbleAppear = this.reducedMotion ? 1 : 0;
-        this.drawBubble(this.bubbleDots);
+        this.redrawBubble();
       }
     }
   }
@@ -1289,7 +660,7 @@ export class HospitalQueueScene {
       if (!this.reducedMotion && this.bubbleTimer >= 0.35) {
         this.bubbleTimer = 0;
         this.bubbleDots = (this.bubbleDots % 3) + 1;
-        this.drawBubble(this.bubbleDots);
+        this.redrawBubble();
       }
       if (this.bubbleAppear < 1) {
         this.bubbleAppear = Math.min(1, this.bubbleAppear + delta * 5);
@@ -1324,7 +695,7 @@ export class HospitalQueueScene {
     if (!this.reducedMotion && this.bubbleTimer - this.bubbleLastUpdate >= 0.35) {
       this.bubbleLastUpdate = this.bubbleTimer;
       this.bubbleDots = (this.bubbleDots % 3) + 1;
-      this.drawBubble(this.bubbleDots);
+      this.redrawBubble();
     }
     if (this.bubbleAppear < 1) {
       this.bubbleAppear = Math.min(1, this.bubbleAppear + delta * 5);
