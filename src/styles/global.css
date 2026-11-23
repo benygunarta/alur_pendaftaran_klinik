@@ -52,11 +52,11 @@ main {
    Z-index 3 menempatkannya di atas stepper (z-index 2). */
 .scene-detail-card {
   position: absolute;
-  right: clamp(0.75rem, 2vw, 1.5rem);
-  top: clamp(0.75rem, 2vw, 1.5rem);
+  left: clamp(0.75rem, 2vw, 1.5rem);
+  top: calc(clamp(0.75rem, 2vw, 1.5rem) + 4.5rem);
   z-index: 3;
   width: min(360px, calc(100% - 2rem));
-  max-height: calc(100% - 7rem);
+  max-height: calc(100% - 8rem);
   overflow-y: auto;
   pointer-events: auto;
   background: rgb(255 255 255 / 0.92);
