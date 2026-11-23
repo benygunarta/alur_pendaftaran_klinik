@@ -1,28 +1,23 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
-import { QUEUE_STEPS, getCorridor } from '../data/queueSteps';
-
-/** Puncak lantai dasar — juga tinggi kaki karakter saat berdiri. */
-const FLOOR_TOP = 0.15;
-/** Puncak lantai ruangan, 0.01 di atas lantai dasar agar tidak z-fighting. */
-const ROOM_FLOOR_TOP = 0.16;
-
-const ZOOM_TRANSITION = 0.72;
-const ZOOM_ROOM_WALK = 0.95;
-const ZOOM_IDLE = 1.6;
-
-/** Amplitudo ayunan langkah (rad). */
-const WALK_AMPLITUDE = 0.85;
-/** Panjang kaki dari hip ke telapak. */
-const LEG_LENGTH = 0.62;
-/** Jarak tanah yang tercakup satu siklus langkah penuh. */
-const STRIDE_SPAN = 2 * LEG_LENGTH * Math.sin(WALK_AMPLITUDE);
-/** Kecepatan jalan di dalam ruangan & saat menyeberangi koridor. */
-const SPEED_ROOM = 1.6;
-const SPEED_TRANSITION = 2.4;
-/** Kemiringan lengan santai (positif = ke luar untuk lengan kanan). */
-const REST_ARM_Z = 0.06;
+import { QUEUE_STEPS } from '../data/queueSteps';
+import {
+  FLOOR_TOP,
+  LEG_LENGTH,
+  REST_ARM_Z,
+  ROOM_FLOOR_TOP,
+  SPEED_ROOM,
+  SPEED_TRANSITION,
+  STRIDE_SPAN,
+  WALK_AMPLITUDE,
+  ZOOM_IDLE,
+  ZOOM_ROOM_WALK,
+  ZOOM_TRANSITION,
+} from '../scene/constants';
+import { buildRoute } from '../scene/path/route';
+import { samplePath as sampleSmoothPath, buildSmoothPath } from '../scene/path/smoothPath';
+import type { CorridorRange } from '../scene/path/types';
 
 type Mode = 'transition' | 'room' | 'idle';
 
@@ -42,22 +37,6 @@ interface StaffEntry {
   parts: CharacterParts;
   baseY: number;
   phase: number;
-}
-
-/** Rentang indeks control point yang berasal dari satu koridor. */
-interface CorridorMark {
-  from: number;
-  to: number;
-  startIndex: number;
-  endIndex: number;
-}
-
-/** Rentang jarak pada jalur halus yang masih berada di koridor. */
-interface CorridorRange {
-  from: number;
-  to: number;
-  start: number;
-  end: number;
 }
 
 /** Material satu ruangan beserta warna/opasitas dasarnya, untuk crossfade transisi. */
@@ -1006,71 +985,16 @@ export class HospitalQueueScene {
     this.transitionFrom = fromIndex;
     this.transitionTo = safeIndex;
 
-    const toVector = (v: [number, number, number]) =>
-      new THREE.Vector3(v[0], v[1] + FLOOR_TOP, v[2]);
-    const control: THREE.Vector3[] = [];
-    /** Indeks titik kontrol terakhir sebelum waypoint ruangan tujuan. */
-    let corridorEndIndex = -1;
-    const corridorMarks: CorridorMark[] = [];
-    const addPoint = (v: THREE.Vector3) => {
-      const last = control[control.length - 1];
-      if (!last || last.distanceToSquared(v) > 0.0025) control.push(v);
-    };
-    const addAll = (points: [number, number, number][]) => {
-      for (const p of points) addPoint(toVector(p));
-    };
-
-    /** Ruangan yang dilalui jalur, dipakai updateRoomVisibility(). */
-    const routeRooms: number[] = [];
-    const markRoom = (index: number) => {
-      if (routeRooms[routeRooms.length - 1] !== index) routeRooms.push(index);
-    };
-
-    if (instant || fromIndex === safeIndex) {
-      // Tanpa koridor: replay / klik tab yang sama → kembali ke awal ruangan.
-      addAll(step.waypoints);
-      markRoom(safeIndex);
-    } else {
-      const dir = safeIndex > fromIndex ? 1 : -1;
-      markRoom(fromIndex);
-      for (let i = fromIndex; i !== safeIndex; i += dir) {
-        const markStart = control.length;
-        addAll(getCorridor(i, i + dir) ?? []);
-        corridorEndIndex = control.length - 1;
-        if (corridorEndIndex >= markStart) {
-          corridorMarks.push({
-            from: i,
-            to: i + dir,
-            startIndex: markStart,
-            endIndex: corridorEndIndex,
-          });
-        }
-        if (i + dir !== safeIndex) {
-          addAll(QUEUE_STEPS[i + dir].waypoints);
-          markRoom(i + dir);
-        }
-      }
-      addAll(step.waypoints);
-      markRoom(safeIndex);
-    }
-    this.routeRooms = routeRooms;
-
-    // Anti-teleport: mulai dari posisi sekarang bila jalur baru jauh.
-    if (!instant && control.length > 0) {
-      const current = this.patient.group.position;
-      const flat = new THREE.Vector3(current.x, FLOOR_TOP, current.z);
-      if (flat.distanceToSquared(control[0]) > 0.16) {
-        control.unshift(flat);
-        if (corridorEndIndex >= 0) corridorEndIndex++;
-        for (const mark of corridorMarks) {
-          mark.startIndex++;
-          mark.endIndex++;
-        }
-      }
-    }
-
-    this.pathPoints = control;
-    this.buildSmoothPath(control, corridorEndIndex, corridorMarks);
+    const route = buildRoute(safeIndex, fromIndex, instant, this.patient.group.position);
+    this.pathPoints = route.control;
+    this.routeRooms = route.routeRooms;
+    const smooth = buildSmoothPath(route.control, route.corridorEndIndex, route.corridorMarks);
+    this.pathSamples = smooth.pathSamples;
+    this.pathDistances = smooth.pathDistances;
+    this.pathLength = smooth.pathLength;
+    this.transitionLength = smooth.transitionLength;
+    this.corridorRanges = smooth.corridorRanges;
+    this.travel = smooth.travel;
     this.walkSpeed = 0;
     this.walkTime = 0;
     this.turnRate = 0;
@@ -1125,135 +1049,6 @@ export class HospitalQueueScene {
       this.zoomAnimating = true;
       this.controls.update();
     }
-  }
-
-  /**
-   * Ubah polyline menjadi sampel halus. Setiap tikungan dipotong dengan
-   * kurva Beziera kuadrat (radius maksimal 0.55) supaya pasien tidak berbalik
-   * 90° secara instan. Jarak dihitung kumulatif agar kecepatan konstan.
-   */
-  private buildSmoothPath(
-    control: THREE.Vector3[],
-    corridorEndIndex: number,
-    corridorMarks: CorridorMark[] = []
-  ): void {
-    this.pathSamples = [];
-    if (control.length === 0) {
-      this.pathDistances = [];
-      this.pathLength = 0;
-      this.transitionLength = 0;
-      this.corridorRanges = [];
-      this.travel = 0;
-      return;
-    }
-
-    const push = (v: THREE.Vector3) => {
-      const last = this.pathSamples[this.pathSamples.length - 1];
-      if (!last || last.distanceToSquared(v) > 1e-6) this.pathSamples.push(v.clone());
-    };
-    push(control[0]);
-
-    for (let i = 1; i < control.length - 1; i++) {
-      const prev = control[i - 1];
-      const cur = control[i];
-      const next = control[i + 1];
-      const inDir = new THREE.Vector3().subVectors(cur, prev);
-      const outDir = new THREE.Vector3().subVectors(next, cur);
-      const inLen = inDir.length();
-      const outLen = outDir.length();
-      if (inLen < 1e-4 || outLen < 1e-4) {
-        push(cur);
-        continue;
-      }
-      inDir.divideScalar(inLen);
-      outDir.divideScalar(outLen);
-      if (inDir.dot(outDir) > 0.985) {
-        push(cur); // hampir lurus, tidak perlu dibulatkan
-        continue;
-      }
-
-      const radius = Math.min(0.55, inLen * 0.32, outLen * 0.32);
-      const entry = new THREE.Vector3().copy(cur).addScaledVector(inDir, -radius);
-      const exit = new THREE.Vector3().copy(cur).addScaledVector(outDir, radius);
-      push(entry);
-      for (let s = 1; s <= 5; s++) {
-        const t = s / 5;
-        const a = 1 - t;
-        push(
-          new THREE.Vector3()
-            .addScaledVector(entry, a * a)
-            .addScaledVector(cur, 2 * a * t)
-            .addScaledVector(exit, t * t)
-        );
-      }
-    }
-    push(control[control.length - 1]);
-
-    this.pathDistances = [0];
-    for (let i = 1; i < this.pathSamples.length; i++) {
-      this.pathDistances[i] =
-        this.pathDistances[i - 1] + this.pathSamples[i].distanceTo(this.pathSamples[i - 1]);
-    }
-    this.pathLength = this.pathDistances[this.pathDistances.length - 1] ?? 0;
-
-    if (corridorEndIndex >= 0 && corridorEndIndex < control.length) {
-      this.transitionLength = this.distanceAtControl(control[corridorEndIndex]);
-    } else {
-      this.transitionLength = 0;
-    }
-
-    this.corridorRanges = corridorMarks
-      .filter((mark) => mark.startIndex < control.length && mark.endIndex < control.length)
-      .map((mark) => ({
-        from: mark.from,
-        to: mark.to,
-        start: this.distanceAtControl(control[mark.startIndex]),
-        end: this.distanceAtControl(control[mark.endIndex]),
-      }))
-      .filter((range) => range.end > range.start);
-    this.travel = 0;
-  }
-
-  /** Jarak pada jalur halus yang paling dekat dengan sebuah titik kontrol. */
-  private distanceAtControl(point: THREE.Vector3): number {
-    let best = 0;
-    let bestDist = Infinity;
-    for (let i = 0; i < this.pathSamples.length; i++) {
-      const d = this.pathSamples[i].distanceToSquared(point);
-      if (d < bestDist) {
-        bestDist = d;
-        best = i;
-      }
-    }
-    return this.pathDistances[best] ?? 0;
-  }
-
-  /** Ambil posisi & arah jalur pada jarak tertentu (binary search, tanpa alokasi). */
-  private samplePath(distance: number, outPos: THREE.Vector3, outDir: THREE.Vector3): void {
-    const n = this.pathSamples.length;
-    if (n === 0) return;
-    if (n === 1) {
-      outPos.copy(this.pathSamples[0]);
-      outDir.set(0, 0, 1);
-      return;
-    }
-    const d = Math.max(0, Math.min(distance, this.pathLength));
-    let lo = 0;
-    let hi = n - 1;
-    while (lo < hi - 1) {
-      const mid = (lo + hi) >> 1;
-      if (this.pathDistances[mid] <= d) lo = mid;
-      else hi = mid;
-    }
-    const d0 = this.pathDistances[lo];
-    const d1 = this.pathDistances[hi];
-    const t = d1 > d0 ? (d - d0) / (d1 - d0) : 0;
-    outPos.lerpVectors(this.pathSamples[lo], this.pathSamples[hi], t);
-    outDir.subVectors(this.pathSamples[hi], this.pathSamples[lo]);
-    if (outDir.lengthSq() < 1e-8 && lo > 0) {
-      outDir.subVectors(this.pathSamples[lo], this.pathSamples[lo - 1]);
-    }
-    outDir.normalize();
   }
 
   private static smoothstep(edge0: number, edge1: number, x: number): number {
@@ -1404,7 +1199,14 @@ export class HospitalQueueScene {
     // Ease-in dari diam & ease-out saat mendekat tujuan.
     this.walkSpeed += (targetSpeed - this.walkSpeed) * (1 - Math.exp(-5 * delta));
     this.travel = Math.min(this.travel + this.walkSpeed * delta, this.pathLength);
-    this.samplePath(this.travel, this.movePos, this.moveDir);
+    sampleSmoothPath(
+      this.pathSamples,
+      this.pathDistances,
+      this.pathLength,
+      this.travel,
+      this.movePos,
+      this.moveDir
+    );
     this.patient.group.position.copy(this.movePos);
 
     // Arah hadap mengikuti tangen jalur, dengan laju belok dibatasi supaya
