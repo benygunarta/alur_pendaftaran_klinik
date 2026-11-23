@@ -1,5 +1,7 @@
 import type * as THREE from 'three';
 
+export type Mode = 'transition' | 'room' | 'idle';
+
 export interface CharacterParts {
   group: THREE.Group;
   head: THREE.Mesh;

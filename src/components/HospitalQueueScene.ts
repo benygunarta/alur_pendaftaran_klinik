@@ -36,12 +36,17 @@ import {
 } from '../scene/textures/canvasTextures';
 import type {
   CharacterParts,
+  Mode,
   QueueDisplay,
   RoomEntry,
   StaffEntry,
 } from '../scene/types';
-
-type Mode = 'transition' | 'room' | 'idle';
+import { updateRoomVisibility } from '../scene/animation/roomVisibility';
+import {
+  updateActiveMarker,
+  updateCameraTarget,
+  updateZoom,
+} from '../scene/animation/cameraRig';
 
 export class HospitalQueueScene {
   private container: HTMLElement;
@@ -404,7 +409,7 @@ export class HospitalQueueScene {
     // lewat updateCameraTarget() sampai transisi selesai.
 
     this.orientStaff(safeIndex);
-    this.updateRoomVisibility();
+    this.syncRoomVisibility();
 
     if (instant && this.pathSamples.length > 0) {
       this.patient.group.position.copy(this.pathSamples[0]);
@@ -422,78 +427,17 @@ export class HospitalQueueScene {
     }
   }
 
-  private static smoothstep(edge0: number, edge1: number, x: number): number {
-    const t = Math.max(0, Math.min(1, (x - edge0) / (edge1 - edge0)));
-    return t * t * (3 - 2 * t);
-  }
-
-  private setRoomOpacity(entry: RoomEntry | undefined, fade: number): void {
-    if (!entry) return;
-    const value = Math.max(0, Math.min(1, fade));
-    const transparent = value < 0.999;
-    for (const item of entry.mats) {
-      if (item.mat.transparent !== transparent) {
-        item.mat.transparent = transparent;
-        item.mat.needsUpdate = true;
-      }
-      item.mat.opacity = item.opacity * value;
-    }
-  }
-
-  /**
-   * Selama transisi, semua ruangan yang dilalui jalur tampil bersamaan supaya
-   * pergantian tidak terasa "kedip" dan pasien tidak berjalan di atas ruang
-   * kosong. Tiap ruangan diberi offset Y kecil agar lantai yang tumpang tindih
-   * tidak z-fighting, lalu kabur bergantian mengikuti progres perjalanan.
-   * Setelah pasien masuk ruangan tujuan, hanya ruangan itu yang tersisa.
-   */
-  private updateRoomVisibility(): void {
-    const inTransition =
-      this.transitionLength > 0 &&
-      this.travel < this.transitionLength &&
-      this.transitionFrom !== this.transitionTo;
-
-    if (!inTransition) {
-      this.roomEntries.forEach((entry, i) => {
-        entry.group.visible = i === this.activeStepIndex;
-        entry.group.position.y = entry.baseY;
-        this.setRoomOpacity(entry, 1);
-      });
-      return;
-    }
-
-    // Tampilkan semua ruang yang dilalui, bukan hanya asal dan tujuan.
-    // Saat pengguna melompat 1→4, pasien melewati ruang 2 dan 3 — ruang itu
-    // harus tetap terlihat supaya jalannya tidak mengambang di atas kekosongan.
-    const rooms = this.routeRooms.length
-      ? this.routeRooms
-      : [this.transitionFrom, this.transitionTo];
-    for (const entry of this.roomEntries) entry.group.visible = false;
-
-    // Offset Y bertingkat mencegah z-fighting pada lantai ruang yang overlap.
-    rooms.forEach((room, order) => {
-      const entry = this.roomEntries[room];
-      if (!entry) return;
-      entry.group.visible = true;
-      entry.group.position.y = entry.baseY - 0.004 * (rooms.length - 1 - order);
-    });
-
-    const progress = this.travel / Math.max(this.transitionLength, 0.001);
-    const count = rooms.length;
-    rooms.forEach((room, order) => {
-      const entry = this.roomEntries[room];
-      if (!entry) return;
-      const center = (order + 0.5) / count;
-      const fadeIn =
-        order === 0
-          ? 1
-          : HospitalQueueScene.smoothstep(center - 0.45, center - 0.05, progress);
-      const fadeOut =
-        order === count - 1
-          ? 1
-          : 1 - HospitalQueueScene.smoothstep(center + 0.05, center + 0.45, progress);
-      this.setRoomOpacity(entry, Math.max(0, Math.min(fadeIn, fadeOut)));
-    });
+  /** Orkestrasi visibilitas ruangan memakai state scene terkini. */
+  private syncRoomVisibility(): void {
+    updateRoomVisibility(
+      this.roomEntries,
+      this.activeStepIndex,
+      this.transitionLength,
+      this.travel,
+      this.transitionFrom,
+      this.transitionTo,
+      this.routeRooms
+    );
   }
 
   /** Kembalikan pasien ke waypoint awal tahap aktif tanpa mereset informasi kartu. */
@@ -786,25 +730,6 @@ export class HospitalQueueScene {
     }
   }
 
-  private updateCameraTarget(): void {
-    if (this.mode === 'transition') {
-      this.targetLookAt.copy(this.patient.group.position);
-    } else {
-      this.targetLookAt.set(...this.stepRoomCenter);
-    }
-  }
-
-  private updateZoom(delta: number): void {
-    if (!this.zoomAnimating) return;
-    const k = this.reducedMotion ? 1 : 1 - Math.exp(-6 * delta);
-    this.camera.zoom += (this.targetZoom - this.camera.zoom) * k;
-    if (Math.abs(this.camera.zoom - this.targetZoom) < 0.02) {
-      this.camera.zoom = this.targetZoom;
-      this.zoomAnimating = false;
-    }
-    this.camera.updateProjectionMatrix();
-  }
-
   /**
  * Fungsi updateRoomDim DIHAPUS.
  * Alasan:
@@ -816,14 +741,6 @@ export class HospitalQueueScene {
  *     dan material warna statis per ruangan.
  *   - Penghapusan ini mengurangi 1 traversal scene + perhitungan matematis per frame.
  */
-
-  /** Panah penanda ruangan aktif: mengambang & berputar pelan. */
-  private updateActiveMarker(): void {
-    const elapsed = this.timer.getElapsed();
-    const t = this.reducedMotion ? 0 : elapsed;
-    this.activeArrow.position.y = 4 + Math.sin(t * 2) * 0.18;
-    this.activeArrow.rotation.y = t * 0.8;
-  }
 
   private animate = (timestamp?: number): void => {
     this.animationFrameId = requestAnimationFrame(this.animate);
@@ -853,10 +770,21 @@ if (shouldUpdateStaff) {
       this.blendTalkingOut(delta);
     }
 
-    this.updateActiveMarker();
-    this.updateCameraTarget();
-    this.updateZoom(delta);
-    this.updateRoomVisibility();
+    updateActiveMarker(this.activeArrow, this.timer.getElapsed(), this.reducedMotion);
+    updateCameraTarget(
+      this.mode,
+      this.patient.group.position,
+      this.targetLookAt,
+      this.stepRoomCenter
+    );
+    this.zoomAnimating = updateZoom(
+      this.camera,
+      this.targetZoom,
+      this.reducedMotion,
+      delta,
+      this.zoomAnimating
+    );
+    this.syncRoomVisibility();
 
     // Damping berbasis delta — konsisten di 60Hz maupun 144Hz.
     const kLook = this.reducedMotion ? 1 : 1 - Math.exp(-5 * delta);
