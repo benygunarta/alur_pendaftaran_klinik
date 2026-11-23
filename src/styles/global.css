@@ -48,6 +48,37 @@ main {
   backdrop-filter: blur(10px);
 }
 
+/* Kartu detail tahap melayang di atas kanvas 3D.
+   Z-index 3 menempatkannya di atas stepper (z-index 2). */
+.scene-detail-card {
+  position: absolute;
+  right: clamp(0.75rem, 2vw, 1.5rem);
+  bottom: clamp(0.75rem, 2vw, 1.5rem);
+  z-index: 3;
+  width: min(360px, calc(100% - 2rem));
+  max-height: calc(100% - 7rem);
+  overflow-y: auto;
+  pointer-events: auto;
+  background: rgb(255 255 255 / 0.92);
+  backdrop-filter: blur(10px);
+  box-shadow:
+    0 20px 45px -18px rgb(15 23 42 / 0.35),
+    0 4px 12px -4px rgb(15 23 42 / 0.12);
+}
+
+/* Layar kecil: kartu turun di bawah kanvas agar tidak menutup model. */
+@media (max-width: 1023px) {
+  .scene-detail-card {
+    position: static;
+    width: auto;
+    max-height: none;
+    overflow: visible;
+    margin-top: 1rem;
+    background: #fff;
+    backdrop-filter: none;
+  }
+}
+
 /* Aura lembut di belakang model agar kanvas "duduk" di halaman,
    bukan terlihat seperti kotak terpisah.
    - filter: blur(2px) dinyatakan non-aktif; gradient warna sudah cukup
