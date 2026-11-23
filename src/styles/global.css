@@ -1,0 +1,119 @@
+@import "tailwindcss";
+
+/* ------------------------------------------------------------------
+   Overflow — cegah geseran horizontal
+   Aura glow pada .scene-stage::before menembus batas container
+   (inset horizontal negatif), sehingga document scrollWidth melebihi
+   viewport dan halaman bisa digeser ke samping (terasa "nempel kiri").
+   overflow-x: clip memotongnya tanpa membuat scroll container baru,
+   jadi sticky header & perilaku scroll tetap aman. */
+main {
+  overflow-x: clip;
+}
+
+/* ------------------------------------------------------------------
+   Scene 3D — menyatu dengan halaman
+   ------------------------------------------------------------------ */
+
+/* Wadah scene: hanya tempat glow, tanpa bingkai kotak. */
+.scene-stage {
+  position: relative;
+  isolation: isolate;
+}
+
+/* Layer overlay untuk stepper — menempel di atas kanvas.
+   Elemen induk transparan terhadap pointer agar area di luar panel
+   tetap bisa dipakai untuk drag/scroll kanvas. */
+.scene-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  padding: clamp(0.75rem, 2vw, 1.5rem);
+  pointer-events: none;
+}
+
+.scene-overlay-panel {
+  display: inline-flex;
+  max-width: 100%;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding: 0.5rem;
+  pointer-events: auto;
+  border-radius: 1rem;
+  border: 1px solid rgb(255 255 255 / 0.7);
+  background: rgb(255 255 255 / 0.85);
+  box-shadow:
+    0 10px 30px -12px rgb(15 23 42 / 0.25),
+    0 2px 8px -2px rgb(15 23 42 / 0.08);
+  backdrop-filter: blur(10px);
+}
+
+/* Aura lembut di belakang model agar kanvas "duduk" di halaman,
+   bukan terlihat seperti kotak terpisah.
+   - filter: blur(2px) dinyatakan non-aktif; gradient warna sudah cukup
+     untuk membuat transisi halus tanpa beban komposisi blur berulang.
+   - inset dikurangi sedikit agar aura tidak keluar dari batas viewport. */
+.scene-stage::before {
+  content: "";
+  position: absolute;
+  inset: -5% -4% -8%;
+  z-index: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(58% 52% at 50% 54%, rgba(14, 165, 233, 0.08), transparent 72%),
+    radial-gradient(75% 68% at 50% 58%, rgba(255, 255, 255, 0.92), transparent 76%);
+}
+
+/* Tepi kanvas memudar ke latar halaman hanya di ATAS & BAWAH agar batas
+   kotak tidak terlihat, sementara sisi kiri/kanan tetap tegas penuh.
+   Lebar pita pudar (19% dari tepi) identik dengan mask radial sebelumnya,
+   hanya arahnya yang kini vertikal. */
+#scene-container {
+  position: relative;
+  z-index: 1;
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    transparent 0%,
+    rgba(0, 0, 0, 0.34) 5.5%,
+    rgba(0, 0, 0, 0.72) 12%,
+    #000 19%,
+    #000 81%,
+    rgba(0, 0, 0, 0.72) 88%,
+    rgba(0, 0, 0, 0.34) 94.5%,
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    to bottom,
+    transparent 0%,
+    rgba(0, 0, 0, 0.34) 5.5%,
+    rgba(0, 0, 0, 0.72) 12%,
+    #000 19%,
+    #000 81%,
+    rgba(0, 0, 0, 0.72) 88%,
+    rgba(0, 0, 0, 0.34) 94.5%,
+    transparent 100%
+  );
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #scene-container {
+    -webkit-mask-image: linear-gradient(
+      to bottom,
+      transparent 0%,
+      rgba(0, 0, 0, 0.4) 1.5%,
+      #000 12%,
+      #000 88%,
+      rgba(0, 0, 0, 0.4) 98.5%,
+      transparent 100%
+    );
+    mask-image: linear-gradient(
+      to bottom,
+      transparent 0%,
+      rgba(0, 0, 0, 0.4) 1.5%,
+      #000 12%,
+      #000 88%,
+      rgba(0, 0, 0, 0.4) 98.5%,
+      transparent 100%
+    );
+  }
+}
