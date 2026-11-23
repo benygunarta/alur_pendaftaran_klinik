@@ -1,90 +1,137 @@
-import type { StepContent } from '../content/steps';
+// Koordinat & jalur scene 3D — sumber tunggal untuk layout isometrik.
+// Sebelumnya data ini diduplikasi di sini dengan koordinat lama (z=0 untuk
+// semua ruangan). Versi aktif dipindahkan utuh dari data/queueSteps.ts.
 
-// Koordinat ruangan 3D (posisi tengah kamera per tahap - sequentially arranged)
-// Urutan: kiri ke kanan sepanjang sumbu X
-// Ini memudahkan menyembunyikan ruangan tidak aktif dengan memindahkan posisinya
-export const ROOM_CENTERS = [
+/** Room center per tahap - SEQUENTIAL (dari kiri ke kanan sepanjang sumbu X).
+ * Urutan ini memudahkan menyembunyikan ruangan tidak aktif dengan memindahkan posisinya.
+ */
+export const ROOM_CENTERS: [number, number, number][] = [
   [-15, 0, 0], // 1. Pendaftaran - kiri
   [-5, 0, 0],  // 2. Skrining & Tunggu
   [5, 0, 0],   // 3. Poliklinik
   [15, 0, 0],  // 4. Farmasi & Kasir - kanan
 ];
 
-// Waypoint laluan pasien per tahap - disesuaikan dengan layout berurutan sumbu X (z=0)
-// Setiap tahap memiliki 3 waypoint untuk membuat lintasan gerak yang mulus
-export const WAYPOINTS = [
-  // Tahap 1: Loket Pendaftaran - gerak dari kiri ke kanan di z=0
+/** Waypoints per tahap. */
+export const WAYPOINTS: [number, number, number][][] = [
   [
-    [-12.5, 0, 0],   // Mulai dari kiri luar
-    [-7.2, 0, 0],    // Menuju center kiri kamar
-    [-2.0, 0, 0],    // Menuju lebih kanan menuju exit
+    // Tahap 1: mulai dari depan pintu ruang pendaftaran (gerbang local z ≈ 5.45),
+    // masuk ruangan, lalu berhenti tepat di depan mesin antrean/kiosk (local x ≈ 2.8, z ≈ -2.5).
+    [-15.0, 0, 6.2],
+    [-15.0, 0, 3.2],
+    [-12.2, 0, 0.8],
+    [-12.2, 0, -1.5],
   ],
-  // Tahap 2: Skrining & Ruang Tunggu - melintasi seluruh kanvas sumbu X
   [
-    [-2.0, 0, 0],    // Dari center kiri kamar 1
-    [5.0, 0, 0],     // Melintai center menuju kanan kamar 2
-    [12.0, 0, 0],    // Kanan ekstrem melewati kamar 3
+    // Tahap 2: masuk lewat pintu depan ruang skrining (local x ≈ -3.2, z ≈ 5.45),
+    // lalu berhenti berdiri di depan deretan kursi antrean (kursi pertama local x ≈ -2.5, z ≈ -2.4).
+    [-8.2, 0, 4.6],
+    [-8.2, 0, 2.2],
+    [-7.5, 0, -0.9],
   ],
-  // Tahap 3: Poliklinik - gerak dari kiri ke center kanan
   [
-    [-8.0, 0, 0],    // Dari kiri luar menuju kamar 3
-    [-2.0, 0, 0],    // Menuju center passing through
-    [4.0, 0, 0],     // Ke center kanan kamar 3 menuju kamar 4
+    // Tahap 3: masuk lewat pintu depan ruang poliklinik (local x ≈ 0, z ≈ 5.45),
+    // lalu berhenti berdiri di depan meja konsultasi dokter (local x ≈ -0.5, z ≈ -2.2).
+    [5.0, 0, 4.6],
+    [4.5, 0, 1.2],
+    [4.5, 0, -0.9],
   ],
-  // Tahap 4: Farmasi & Kasir - melanjutkan ke kanan ekstrem
   [
-    [6.0, 0, 0],     // Dari center kamar 3 menuju kanan
-    [10.0, 0, 0],    // Melintai area farmasi
-    [14.0, 0, 0],    // Kanan ekstrem keluar scene
-  ],
-];
-
-// Transisi antar tahap (jalur crossing antara ruangan)
-// Sudah disejajar untuk layout sumbu X dengan z=0
-export const TRANSITIONS = [
-  // Dari tahap 1 ke 2 (lewati koridor tengah di z=0)
-  [
-    [-7.2, 0, 0],    // Dari waypoint akhir tahap 1
-    [-2.8, 0, 0],    // Center koridor kiri
-    [-2.8, 0, 0],    // Center koridor kanan (pause)
-    [6.0, 0, 0],     // Ke center kanan
-    [5.5, 0, 0],     // Ke waypoint awal tahap 2
-  ],
-  // Dari tahap 2 ke 3 (crossing penuh dari kanan ke kiri lewat center z=0)
-  [
-    [11.6, 0, 0],    // Dari ujung kanan tahap 2
-    [11.6, 0, 0],    // Tetap di ujung kanan
-    [-2.8, 0, 0],    // Melintai center ke kiri
-    [-2.8, 0, 0],    // Center kiri
-    [-12.2, 0, 0],   // Ke ujung kiri tahap 3
-  ],
-  // Dari tahap 3 ke 4 (melintai melalui celah pintu ruang 4 di z=0)
-  [
-    [-6.5, 0, 0],    // Dari ujung kiri tahap 3
-    [-2.8, 0, 0],    // Center koridor
-    [2.8, 0, 0],     // Center koridor kanan
-    [2.8, 0, 0],     // Pause di center kanan
-    [3.9, 0, 0],     // Ke slightly kiri dari farmasi
-    [5.8, 0, 0],     // Ke waypoint awal tahap 4
+    // Tahap 4: masuk lewat pintu depan ruang farmasi (local x ≈ 0, z ≈ 5.45),
+    // lalu berhenti berdiri menghadap konter penyerahan obat (local x ≈ 0, z ≈ -1.6).
+    [15.0, 0, 4.6],
+    [15.0, 0, 2.2],
+    [15.0, 0, 0.3],
+    [15.0, 0, -0.3],
   ],
 ];
 
-// Posisi petugas per tahap - disesuaikan z=0 (dengan posisi ruangan)
-// Petugas duduk/berdiri di depan/center setiap kamar
-export const STAFF_POSITIONS = [
-  [-10.2, 0, 0],      // Tahap 1: Di kiri kamar 1 (registrasi)
-  [11.5, 0, 0],       // Tahap 2: Di kanan kamar 2 (skrining & tunggu)
-  [-9.5, 0, 0],       // Tahap 3: Di kiri kamar 3 (poliklinik)
-  [9, 0, 0],          // Tahap 4: Di kanan kamar 4 (farmasi & kasir)
+/**
+ * Titik koridor di antara dua ruangan, TANPA titik ujung.
+ * Titik awal diambil dari waypoint terakhir ruangan asal, titik akhir dari
+ * waypoint pertama ruangan tujuan — jadi sambungannya eksak. Arah mundur
+ * didefinisikan tersendiri: pintu keluar ruangan tidak sama dengan pintu
+ * masuknya, jadi membalik jalur maju akan membuat pasien berjalan ke titik
+ * yang salah. Hindari pula titik dobel yang membuat pasien berhenti sejenak.
+ */
+export const CORRIDOR_JOINTS: { from: number; to: number; points: [number, number, number][] }[] = [
+  // 1 → 2: dari kiosk kembali ke pintu ruang 1, menyusur koridor depan, masuk pintu ruang 2.
+  {
+    from: 0,
+    to: 1,
+    points: [
+      [-12.2, 0, 1.2],
+      [-15.0, 0, 4.6],
+      [-15.0, 0, 6.4],
+      [-11.5, 0, 6.4],
+      [-8.2, 0, 6.4],
+    ],
+  },
+  // 2 → 1: dari depan kursi keluar pintu ruang 2, lewat koridor depan, masuk pintu ruang 1.
+  {
+    from: 1,
+    to: 0,
+    points: [
+      [-8.2, 0, 1.8],
+      [-8.2, 0, 6.4],
+      [-11.5, 0, 6.4],
+      [-15.0, 0, 6.4],
+    ],
+  },
+  // 2 → 3: dari depan kursi keluar pintu ruang 2, menyusur koridor depan, masuk pintu ruang 3.
+  {
+    from: 1,
+    to: 2,
+    points: [
+      [-8.2, 0, 2.2],
+      [-8.2, 0, 6.4],
+      [-3.0, 0, 6.4],
+      [5.0, 0, 6.4],
+    ],
+  },
+  // 3 → 2: dari depan meja konsultasi keluar pintu ruang 3, lewat koridor depan, masuk pintu ruang 2.
+  {
+    from: 2,
+    to: 1,
+    points: [
+      [5.0, 0, 2.2],
+      [5.0, 0, 6.4],
+      [-3.0, 0, 6.4],
+      [-8.2, 0, 6.4],
+    ],
+  },
+  // 3 → 4: dari depan meja konsultasi keluar pintu ruang 3, lewat koridor depan,
+  // lalu masuk pintu depan ruang 4.
+  {
+    from: 2,
+    to: 3,
+    points: [
+      [5.0, 0, 2.2],
+      [5.0, 0, 6.4],
+      [10.0, 0, 6.4],
+      [15.0, 0, 6.4],
+    ],
+  },
+  // 4 → 3: dari depan konter keluar pintu depan ruang 4, lewat koridor depan,
+  // lalu masuk pintu ruang 3.
+  {
+    from: 3,
+    to: 2,
+    points: [
+      [15.0, 0, 2.2],
+      [15.0, 0, 6.4],
+      [10.0, 0, 6.4],
+      [5.0, 0, 6.4],
+    ],
+  },
 ];
 
-// Parameter animasi
-export const ANIMATION = {
-  SPEED_ROOM: 1.6,
-  SPEED_TRANSITION: 2.4,
-  WALK_AMPLITUDE: 0.85,
-  STRIDE_SPAN: 3.116, // 2 * 0.62 * sin(0.85)
-  ZOOM_TRANSITION: 0.72,
-  ZOOM_ROOM_WALK: 0.95,
-  ZOOM_IDLE: 1.6,
-};
+/** Staff position per tahap - disesuaikan z=0 (dengan posisi ruangan).
+ * Petugas duduk/berdiri di depan/center setiap kamar
+ */
+export const STAFF_POSITIONS: [number, number, number][] = [
+  [-16.2, 0, -4.2],
+  [-2.5, 0, -2.8],
+  [4.5, 0, -3.6],
+  [15.0, 0, -3.0],
+];
